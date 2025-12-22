@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: scoj-backend
+    runtime: node
+    region: singapore
+    plan: free
+    branch: main
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: SUPABASE_URL
+        value: https://wffyzltswxtclisthcpd.supabase.co # Replace with your actual URL
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        value: sb_publishable_66jT6RtGZEbwqaEqEEqw5g_JOrpBogw # Replace with your actual key
+    healthCheckPath: /api/health
+    autoDeploy: true
