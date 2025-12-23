@@ -1,38 +1,72 @@
 const express = require('express');
 const cors = require('cors');
-const { createClient } = require('@supabase/supabase-js');
+const mysql = require('mysql2/promise'); // Use promise version
 
 const app = express();
 
-// Enable CORS for all origins (you can restrict later)
+// CORS Configuration
 app.use(cors({
-  origin: '*',
-  methods: ['GET', 'POST'],
+  origin: ['https://scojfood.com', 'http://localhost:3000'],
   credentials: true
 }));
 
 app.use(express.json());
 
+// MySQL Database Configuration
+const dbConfig = {
+  host: process.env.DB_HOST,           // Hostinger external host
+  port: process.env.DB_PORT || 3306,   // Default MySQL port
+  user: process.env.DB_USER,           // Your database username
+  password: process.env.DB_PASSWORD,   // Your database password
+  database: process.env.DB_NAME,       // Your database name
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+};
+
+// Create MySQL connection pool
+let pool;
+
+async function initializePool() {
+  pool = mysql.createPool(dbConfig);
+  console.log('✅ MySQL connection pool created');
+}
+
 // Root endpoint
 app.get('/', (req, res) => {
   res.json({
     message: 'SCOJ Foods Backend API',
-    status: 'running',
-    timestamp: new Date().toISOString()
+    database: 'Hostinger MySQL',
+    status: pool ? 'connected' : 'disconnected'
   });
 });
 
 // Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'OK',
-    service: 'SCOJ Foods API',
-    uptime: process.uptime()
-  });
+app.get('/api/health', async (req, res) => {
+  try {
+    const connection = await pool.getConnection();
+    await connection.ping();
+    connection.release();
+    
+    res.json({
+      status: 'OK',
+      service: 'SCOJ Foods API',
+      database: 'Connected',
+      uptime: process.uptime()
+    });
+  } catch (error) {
+    res.status(500).json({
+      status: 'ERROR',
+      service: 'SCOJ Foods API',
+      database: 'Disconnected',
+      error: error.message
+    });
+  }
 });
 
 // Store contact form submission
 app.post('/api/contact', async (req, res) => {
+  let connection;
   try {
     console.log('📩 Contact form submission received');
     
@@ -46,58 +80,38 @@ app.post('/api/contact', async (req, res) => {
       });
     }
 
-    // Initialize Supabase client
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    // Get connection from pool
+    connection = await pool.getConnection();
     
-    if (!supabaseUrl || !supabaseKey) {
-      return res.status(500).json({
-        success: false,
-        error: 'Server configuration error'
-      });
-    }
+    const [result] = await connection.execute(
+      `INSERT INTO contact_submissions (name, email, phone, subject, message) 
+       VALUES (?, ?, ?, ?, ?)`,
+      [name.trim(), email.trim(), phone.trim(), subject.trim(), message.trim()]
+    );
 
-    const supabase = createClient(supabaseUrl, supabaseKey);
-
-    const { data, error } = await supabase
-      .from('contact_submissions')
-      .insert([{
-        name: name.trim(),
-        email: email.trim(),
-        phone: phone.trim(),
-        subject: subject.trim(),
-        message: message.trim()
-      }])
-      .select()
-      .single();
-
-    if (error) {
-      console.error('❌ Supabase error:', error);
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to save contact information'
-      });
-    }
-
-    console.log('✅ Contact form saved successfully');
+    console.log('✅ Contact form saved successfully, ID:', result.insertId);
     
     res.status(201).json({ 
       success: true, 
       message: 'Contact form submitted successfully',
-      submissionId: data.id
+      submissionId: result.insertId
     });
 
   } catch (error) {
-    console.error('❌ Server error:', error);
+    console.error('❌ MySQL error:', error);
     res.status(500).json({
       success: false,
-      error: 'Internal server error'
+      error: 'Failed to save contact information',
+      details: error.message
     });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
 // Store brochure download request
 app.post('/api/brochure-download', async (req, res) => {
+  let connection;
   try {
     console.log('📥 Brochure download request received');
     
@@ -111,54 +125,53 @@ app.post('/api/brochure-download', async (req, res) => {
       });
     }
 
-    // Initialize Supabase client
-    const supabaseUrl = process.env.SUPABASE_URL;
-    const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+    // Get connection from pool
+    connection = await pool.getConnection();
     
-    if (!supabaseUrl || !supabaseKey) {
-      return res.status(500).json({
-        success: false,
-        error: 'Server configuration error'
-      });
+    // Check if email already exists
+    const [existing] = await connection.execute(
+      'SELECT id, download_count FROM brochure_downloads WHERE email = ?',
+      [email.trim()]
+    );
+
+    let result;
+    
+    if (existing.length > 0) {
+      // Update existing record
+      const [updateResult] = await connection.execute(
+        'UPDATE brochure_downloads SET download_count = download_count + 1 WHERE id = ?',
+        [existing[0].id]
+      );
+      result = { insertId: existing[0].id, downloadCount: existing[0].download_count + 1 };
+      console.log('✅ Updated existing download count');
+    } else {
+      // Insert new record
+      const [insertResult] = await connection.execute(
+        `INSERT INTO brochure_downloads (name, email, phone, company, inquiry_type) 
+         VALUES (?, ?, ?, ?, ?)`,
+        [name.trim(), email.trim(), phone.trim(), company ? company.trim() : null, inquiryType]
+      );
+      result = { insertId: insertResult.insertId, downloadCount: 1 };
+      console.log('✅ New download record created');
     }
 
-    const supabase = createClient(supabaseUrl, supabaseKey);
-
-    const { data, error } = await supabase
-      .from('brochure_downloads')
-      .insert([{
-        name: name.trim(),
-        email: email.trim(),
-        phone: phone.trim(),
-        company: company ? company.trim() : null,
-        inquiry_type: inquiryType
-      }])
-      .select()
-      .single();
-
-    if (error) {
-      console.error('❌ Supabase error:', error);
-      return res.status(500).json({
-        success: false,
-        error: 'Failed to save download request'
-      });
-    }
-
-    console.log('✅ Brochure download recorded');
-    
     res.status(201).json({ 
       success: true, 
       message: 'Download recorded successfully',
       downloadUrl: 'https://yourdomain.com/documents/Scoj Food Brocher.pdf',
-      recordId: data.id
+      recordId: result.insertId,
+      downloadCount: result.downloadCount
     });
 
   } catch (error) {
-    console.error('❌ Server error:', error);
+    console.error('❌ MySQL error:', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to process download request'
+      error: 'Failed to process download request',
+      details: error.message
     });
+  } finally {
+    if (connection) connection.release();
   }
 });
 
@@ -170,11 +183,26 @@ app.use((req, res) => {
   });
 });
 
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({
+    success: false,
+    error: 'Internal server error'
+  });
+});
+
 // Get port from environment or default
 const PORT = process.env.PORT || 3001;
 
-// Start server
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`✅ Health check: http://localhost:${PORT}/api/health`);
+// Initialize and start server
+initializePool().then(() => {
+  app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+    console.log(`📊 Database: Hostinger MySQL`);
+    console.log(`✅ Health check: http://localhost:${PORT}/api/health`);
+  });
+}).catch(error => {
+  console.error('Failed to initialize database:', error);
+  process.exit(1);
 });
